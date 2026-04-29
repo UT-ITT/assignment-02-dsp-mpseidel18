@@ -1,0 +1,223 @@
+import pyglet
+from pyglet.window import key
+import sounddevice as sd
+import numpy as np
+import random
+import time
+
+NOTES = {
+    'C3': 261.63,
+    'C#3/Db3': 277.18,
+    'D3': 293.66,
+    'D#3/Eb3': 311.13,
+    'E3': 329.63,
+    'F3': 349.23,
+    'F#3/Gb3': 369.99,
+    'G3': 392.00,
+    'G#3/Ab3': 415.30,
+    'A3': 440.00,
+    'A#3/Bb3': 466.16,
+    'B3': 493.88
+}
+
+# Open audio stream for microphone input
+class KaraokeGame(pyglet.window.Window):
+    def __init__(self):
+        super().__init__(800, 600, "Karaoke Game")
+        self.keys = set()
+        self.is_game_over = False
+        self.current_note = random.choice(list(NOTES.items()))
+        self.sample_rate = 44100
+        self.score = 0
+        self.state = "start"  # can be "start", "playing", or "game_over"
+        self.current_volume = 0.0
+        self.volume_threshold = 0.015  # Lower threshold for better mic detection
+        self.current_frequency = 0.0
+        self.frequency_tolerance = 50  # Allow a small margin of error
+        self.base_note_time = 4.0
+        self.min_note_time = 1.2
+        self.time_shrink_step = 0.2
+        self.current_note_time = self.base_note_time
+        self.note_start_time = 0.0
+        
+        self.title_label = pyglet.text.Label("Karaoke Game", font_name="Arial", font_size=48,
+                                            x=self.width // 2, y=self.height // 2 + 80,
+                                            anchor_x="center", anchor_y="center", color=(255, 255, 255, 255))
+        self.subtitle_label = pyglet.text.Label("Press ENTER to start", font_name="Arial", font_size=22,
+                                               x=self.width // 2, y=self.height // 2,
+                                               anchor_x="center", anchor_y="center", color=(200, 200, 200, 255))
+        self.input_check_label = pyglet.text.Label("Make sure your microphone is working", font_name="Arial", font_size=18,
+                                                  x=self.width // 2, y=self.height // 2 - 50,
+                                                  anchor_x="center", anchor_y="center", color=(160, 220, 255, 255))
+        self.note_label = pyglet.text.Label("", font_name='Arial', font_size=18,
+                                           x=self.width//2, y=self.height//2 - 80,
+                                           anchor_x='center', anchor_y='center')
+        self.score_label = pyglet.text.Label("", font_name='Arial', font_size=18,
+                                            x=10, y=10, anchor_x='left', anchor_y='bottom')
+        self.timer_label = pyglet.text.Label("", font_name='Arial', font_size=16,
+                             x=self.width - 10, y=10, anchor_x='right', anchor_y='bottom', color=(255, 200, 100, 255))
+        self.game_over_label = pyglet.text.Label("", font_name="Arial", font_size=28,
+                            x=self.width // 2, y=self.height // 2 + 10,
+                            anchor_x="center", anchor_y="center", color=(255, 120, 120, 255))
+        self.restart_label = pyglet.text.Label("Press R to restart", font_name="Arial", font_size=18,
+                              x=self.width // 2, y=self.height // 2 - 35,
+                              anchor_x="center", anchor_y="center", color=(220, 220, 220, 255))
+        
+        # Start audio input stream for mic detection
+        print("Available input devices:\n")
+        devices = sd.query_devices()
+
+        input_devices = []
+        for i, dev in enumerate(devices):
+            if dev['max_input_channels'] > 0:
+                print(f"{i}: {dev['name']}")
+                input_devices.append(i)
+
+        # let user select audio device
+        input_device = int(input("\nSelect input device: "))
+        self.stream = sd.InputStream(
+            channels=1,
+            samplerate=self.sample_rate,
+            blocksize=1024,
+            callback=self.audio_callback,
+            latency='low'
+        )
+        self.stream.start()
+
+    def draw_start_frame(self):
+        self.title_label.draw()
+        self.subtitle_label.draw()
+        self.input_check_label.draw()
+        
+        # Microphone input indicator on start screen
+        color = (0, 255, 0, 255) if self.current_volume > self.volume_threshold else (100, 100, 100, 255)
+        mic_indicator = pyglet.shapes.Circle(self.width - 30, self.height - 30, 10, color=color)
+        mic_indicator.draw()
+
+    def on_draw(self):
+        self.clear()
+        if self.state == "start":
+            self.draw_start_frame()
+        elif self.state == "game_over":
+            self.draw_game_over()
+        else:
+            self.draw_game()
+
+    def draw_game_over(self):
+        self.game_over_label.text = f"You lose! Score: {self.score}"
+        self.game_over_label.draw()
+        self.restart_label.draw()
+
+    def draw_game(self):
+        self.check_note_match()  # Check if user is singing the correct note
+        # Draw circle representing the note in the middle
+        note = pyglet.shapes.Circle(self.width//2, self.height//2, 50, color=(255, 100, 100))
+        
+        # Update and draw note label
+        self.note_label.text = f"Sing: {self.current_note[0]}"
+        self.note_label.draw()
+        note.draw()
+
+        # Update and draw score label
+        self.score_label.text = f"Score: {self.score}"
+        self.score_label.draw()
+        
+        # Microphone input indicator
+        color = (0, 255, 0, 255) if self.current_volume > self.volume_threshold else (100, 100, 100, 255)
+        mic_indicator = pyglet.shapes.Circle(self.width - 30, self.height - 30, 10, color=color)
+        mic_indicator.draw()
+        
+        # Update and draw timer label
+        time_left = max(0.0, self.current_note_time - (time.time() - self.note_start_time))
+        self.timer_label.text = f"Time left: {time_left:.1f}s"
+        self.timer_label.draw()
+
+    def on_key_press(self, symbol, modifiers):
+        if self.state == "start":
+            if symbol == key.ENTER:
+                self.start_round()
+            return
+
+        if symbol == key.ESCAPE:
+            self.state = "start"
+            self.keys.clear()
+            return
+
+        if self.state == "game_over" and symbol == key.R:
+            self.start_round()
+            return
+
+        if symbol in (key.LEFT, key.RIGHT, key.UP, key.DOWN):
+            self.keys.add(symbol)
+    # Audio Game Logic
+    def start_round(self):
+        self.state = "playing"
+        self.score = 0
+        self.current_note_time = self.base_note_time
+        self.current_note = random.choice(list(NOTES.items()))
+        self.note_start_time = time.time()
+        self.play_note(self.current_note[1])
+    # Generate sound wave for a given frequency
+    def generate_sine_wave(self, freq, duration=1.0):
+        t = np.linspace(0, duration, int(self.sample_rate * duration), False)
+        note = np.sin(freq * t * 2 * np.pi)
+        return note.astype(np.float32)
+    # Play the note
+    def play_note(self, freq):
+        sd.stop()  # Stop any currently playing sound
+        note = self.generate_sine_wave(freq)
+        sd.play(note, self.sample_rate)
+
+    def audio_callback(self, indata, frames, time, status):
+        if status:
+            print(status)
+        # Track microphone input volume
+        self.current_volume = np.abs(indata).mean()
+
+        # Extract dominant frequency using FFT
+        if len(indata) > 0: # Ensure we have audio data
+            fft_result = np.fft.rfft(indata[:, 0]) # Mono audio
+            freqs = np.fft.rfftfreq(len(indata), 1 / self.sample_rate) # Get corresponding frequencies
+            dominant_freq = freqs[np.argmax(np.abs(fft_result))]
+            self.current_frequency = dominant_freq
+    
+    def check_note_match(self):
+        if self.state != "playing" or self.current_frequency == 0:
+            return
+
+        target_freq = self.current_note[1]
+        elapsed = time.time() - self.note_start_time
+
+        print(f"Current Frequency: {self.current_frequency:.2f} Hz, Target: {target_freq:.2f} Hz, Elapsed: {elapsed:.2f}s")
+
+        if elapsed > self.current_note_time:
+            self.state = "game_over"
+            self.is_game_over = True
+            return
+
+        # Check if detected frequency is within tolerance AND user is singing (volume > threshold)
+        if abs(self.current_frequency - target_freq) < self.frequency_tolerance and \
+           self.current_volume > self.volume_threshold:
+            self.score += 1
+            self.current_note_time = max(self.min_note_time, self.current_note_time - self.time_shrink_step) # Shrink time for next note
+            self.current_note = random.choice(list(NOTES.items()))
+            self.note_start_time = time.time()
+            self.play_note(self.current_note[1])
+    
+    def on_close(self):
+        # Stop audio stream and exit application
+        try:
+            sd.stop()  # Stop any playing audio
+            self.stream.stop()
+            self.stream.close()
+        except Exception as e:
+            print(f"Fehler beim Stoppen des Audios: {e}")
+        
+        # Fenster explizit schließen
+        self.close() 
+        # Pyglet-Event-Loop komplett beenden
+        pyglet.app.exit()
+
+if __name__ == "__main__":
+    game = KaraokeGame()
+    pyglet.app.run()
