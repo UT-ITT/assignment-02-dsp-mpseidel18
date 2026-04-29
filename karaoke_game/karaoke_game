@@ -212,10 +212,7 @@ class KaraokeGame(pyglet.window.Window):
             self.stream.close()
         except Exception as e:
             print(f"Fehler beim Stoppen des Audios: {e}")
-        
-        # Fenster explizit schließen
         self.close() 
-        # Pyglet-Event-Loop komplett beenden
         pyglet.app.exit()
 
 if __name__ == "__main__":
